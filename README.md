@@ -1,2 +1,2 @@
 # raft-grpc
-Implementation of the Raft consensus algorithm in python with gRPC intercommunication.
+Minimal implementation of the Raft consensus algorithm in python with strong influence from [simpleRaft](https://github.com/streed/simpleRaft).
