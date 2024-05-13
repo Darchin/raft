@@ -3,7 +3,7 @@ from ..messages.message import *
 
 class Node():
     # Time between every heartbeat in seconds
-    Heartbeat_period = 0.1
+    
     def __init__(self, id, node_ids: set):
         self._id = id
         self._node_ids = node_ids
