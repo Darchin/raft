@@ -40,6 +40,7 @@ class State():
             case Message.VoteRequest: self.on_vote_request(message)
             case Message.VoteResponse: self.on_vote_response(message)
     
+    # TODO
     def send_message(self, recipient, message):
         pass
 
@@ -193,13 +194,16 @@ class State():
             self._voted_for = set([None])
             self.cancel_election()
 
+    # TODO
     def cancel_election():
         should_cancel_election = True
     
+    # TODO
     def change_role(self, new_role):
         if new_role == State.Leader:
             threading.Thread(target=self.periodic_heartbeat, args=self).start()
 
+    # TODO
     def hold_election():
         pass
     
