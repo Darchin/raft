@@ -27,6 +27,7 @@ class State():
         self.node_majority = int(len(self.server._node_ids)/2) + 1
         self.id = server._id
         self.should_cancel_election = False
+        self.heartbeat_period = 0.1
     
     # def assign_to_server(self, server):
     #     self.server = server
@@ -43,10 +44,38 @@ class State():
         pass
 
     def commit_log_entries(self):
-        pass
+        def acks(length):
+            ack_nodes = set()
+            for node in self.server._node_ids:
+                if self._acked_length[node] >= length:
+                    ack_nodes.add(node)
+            return len(ack_nodes)
+        min_acks = self.node_majority
+        ready = set([l for l in range(1, len(self._log)+1) if acks(l) >= min_acks])
+        highest_rdy_to_commit = max(ready)
+        if len(ready) != 0 and highest_rdy_to_commit > self._commit_length and self._log[highest_rdy_to_commit - 1][0] == self._current_term:
+            for i in range(self._commit_length, highest_rdy_to_commit):
+                self.deliver_to_server(self._log[i][1])
+            self._commit_length = highest_rdy_to_commit
+
+    def deliver_to_server(self, instruction):
+        self.server._instructions.append(instruction)
 
     def append_entries(self, prefix_len, leader_commit, suffix):
-        pass
+        suffix_len = len(suffix)
+        if suffix_len > 0 and len(self._log) > prefix_len:
+            index = min(len(self._log), prefix_len + suffix_len) - 1
+            if self._log[index][0] != suffix[index-prefix_len][0]:
+                self._log = self._log[:prefix_len]
+        
+        if prefix_len + suffix_len > len(self._log):
+            for i in range(len(self._log) - prefix_len, suffix_len):
+                self._log.append(suffix[i])
+        
+        if leader_commit > self._commit_length:
+            for i in range(self._commit_length, leader_commit):
+                self.deliver_to_server(self._log[i][1])
+            self._commit_length = leader_commit
     
     def replicate_log(self, follower_id):
         prefix_len = self._sent_length[follower_id]
@@ -178,4 +207,4 @@ class State():
         while self._current_role == State.Leader:
             for node in (self._node_ids - set([self._id])):
                 self.replicate_log(node)
-            time.sleep(0.25)
+            time.sleep(self.heartbeat_period)
