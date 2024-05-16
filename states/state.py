@@ -1,11 +1,21 @@
 from ..messages.message import *
 import threading
 import time
+from random import randrange
 
 class State():
     Follower = 1
     Candidate = 2
     Leader = 3
+
+    # in milliseconds
+    HEARTBEAT_INTERVAL = 100
+    LEADER_TIMEOUT_INTERVAL_MIN = 500
+    LEADER_TIMEOUT_INTERVAL_MAX = 1000 
+    LEADER_TIMEOUT_POLLING_INTERVAL = 10
+    CANDIDATE_ELECTION_TIMEOUT = 250
+    CANDIDATE_ELECTION_TIMEOUT_POLLING_INTERVAL = LEADER_TIMEOUT_POLLING_INTERVAL
+
     # 'log' is a list of tuples. tuple pos0 is entry term and tuple pos1 is the entry itself.
     def __init__(self, server, current_term = 0, voted_for = set([None]), log = [], commit_length = 0,
                  current_role = Follower, current_leader = None, votes_received = set(), sent_length = {}, acked_length = {}):
@@ -26,20 +36,24 @@ class State():
         self.server = server
         self.node_majority = int(len(self.server._node_ids)/2) + 1
         self.id = server._id
-        self.should_cancel_election = False
-        self.heartbeat_period = 0.1
+        self.cancel_election = False
+        self.leader_timeout = 0
+        self.election_timeout = 0
+        self.node_ids = set([node_id for node_id in self.server._node_ids])
+        self.node_ids_excluding_self = self.node_ids - set([self.id])
     
-    # def assign_to_server(self, server):
-    #     self.server = server
-
     def handle_received_message(self, message):
         match message._type:
+            case Message.Override: self.set_params(message)
             case Message.Broadcast: self.on_broadcast(message)
             case Message.LogRequest: self.on_log_request(message)
             case Message.LogResponse: self.on_log_response(message)
             case Message.VoteRequest: self.on_vote_request(message)
             case Message.VoteResponse: self.on_vote_response(message)
     
+    def set_params(self, message):
+        self.__dict__.update(message.__dict__)
+
     # TODO
     def send_message(self, recipient, message):
         pass
@@ -47,7 +61,7 @@ class State():
     def commit_log_entries(self):
         def acks(length):
             ack_nodes = set()
-            for node in self.server._node_ids:
+            for node in self.node_ids:
                 if self._acked_length[node] >= length:
                     ack_nodes.add(node)
             return len(ack_nodes)
@@ -93,7 +107,7 @@ class State():
         if self._current_role == State.Leader:
             self._log.append((self._current_term, record))
             self._acked_length[self.id] = len(self._log)
-            for follower_node in (self._node_ids - set([self._id])):
+            for follower_node in self.node_ids_excluding_self:
                 self.replicate_log(follower_node)
         else:
             # Forward client request to leader if received by a follower
@@ -110,7 +124,7 @@ class State():
         if term > self._current_term:
             self._current_term = term
             self._voted_for = set([None])
-            self.cancel_election()
+            self.cancel_election = True
         
         if term == self._current_term:
             self._role = State.Follower
@@ -171,7 +185,7 @@ class State():
         msg_to_send = VoteResponse(self.id, self._current_term, vote_granted)
         self.send_message(candidate_id, msg_to_send)
 
-    def on_vote_response(self, message):    
+    def on_vote_response(self, message):
         voter_id = message.voter_id
         term = message.term
         granted = message.granted
@@ -179,36 +193,75 @@ class State():
         if self._current_role == State.Candidate and term == self._current_term and granted:
             self._votes_received.union(set([voter_id]))
             if len(self._votes_received) >= self.node_majority:
+                self.cancel_election = True
+                # Give enough time to election cancellation status polling to register the change
+                time.sleep(State.CANDIDATE_ELECTION_TIMEOUT_POLLING_INTERVAL/1000)
                 self.change_role(State.Leader)
-                self._current_leader = self.id
-                self.cancel_election()
-                
-                for follower_node in (self._node_ids - set([self._id])):
-                    self._sent_length[follower_node] = len(self._log)
-                    self._acked_length[follower_node] = 0
-                    self.replicate_log(follower_node)
                 
         elif term > self._current_term:
+            self.cancel_election = True
+            # Give enough time to election cancellation status polling to register the change
+            time.sleep(State.CANDIDATE_ELECTION_TIMEOUT_POLLING_INTERVAL/1000)
             self._current_term = term
             self.change_role(State.Follower)
             self._voted_for = set([None])
-            self.cancel_election()
 
-    # TODO
-    def cancel_election():
-        should_cancel_election = True
-    
     # TODO
     def change_role(self, new_role):
-        if new_role == State.Leader:
-            threading.Thread(target=self.periodic_heartbeat, args=self).start()
+        self.cancel_election = False
+        match new_role:
+            case State.Follower:
+                self._current_role = State.Follower
+                threading.Thread(target=self.leader_check, args=self).start()
+
+            case State.Candidate:
+                self._current_role = State.Candidate
+                self._voted_for = set([self.id])
+                self._votes_received = set([self.id])
+                threading.Thread(target=self.hold_election, args=self).start()
+
+            case State.Leader:
+                self._current_role = State.Leader
+                self._current_leader = self.id
+                
+                for follower_node in self.node_ids_excluding_self:
+                    self._sent_length[follower_node] = len(self._log)
+                    self._acked_length[follower_node] = 0
+                    self.replicate_log(follower_node)
+
+                threading.Thread(target=self.periodic_heartbeat, args=self).start()
+
 
     # TODO
-    def hold_election():
-        pass
+    def hold_election(self):
+        self.election_timeout = State.CANDIDATE_ELECTION_TIMEOUT
+        self._current_term += 1
+        last_term = self._log[-1][0] if len(self._log) > 0 else 0
+
+        msg_to_send = VoteRequest(self.id, self._current_term, len(self._log), last_term)
+        for node in self.node_ids_excluding_self:
+            self.send_message(node, msg_to_send)
+
+        while self.election_timeout > 0 and not self.cancel_election:
+            self.election_timeout -= State.CANDIDATE_ELECTION_TIMEOUT_POLLING_INTERVAL
+            # sleeping for slightly less than a millisecond to account for the time needed to run the loop itself
+            time.sleep(State.CANDIDATE_ELECTION_TIMEOUT_POLLING_INTERVAL*(0.99e-3))
+        if not self.cancel_election:
+            self.hold_election()
+        
+    def leader_check(self):
+        self.leader_timeout = randrange(start=State.LEADER_TIMEOUT_INTERVAL_MIN,
+                                        stop=State.LEADER_TIMEOUT_INTERVAL_MAX,
+                                        step=State.LEADER_TIMEOUT_POLLING_INTERVAL)
+        while self.leader_timeout > 0:
+            self.leader_timeout -= State.LEADER_TIMEOUT_POLLING_INTERVAL
+            # sleeping for slightly less than a millisecond to account for the time needed to run the loop itself
+            time.sleep(State.LEADER_TIMEOUT_POLLING_INTERVAL*(0.99e-3))
+        
+        self.change_role(State.Candidate)
     
     def periodic_heartbeat(self):
         while self._current_role == State.Leader:
-            for node in (self._node_ids - set([self._id])):
+            for node in self.node_ids_excluding_self:
                 self.replicate_log(node)
-            time.sleep(self.heartbeat_period)
+            time.sleep((State.HEARTBEAT_INTERVAL/1000))
