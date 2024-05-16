@@ -1,10 +1,15 @@
 class Message:
     # Usage of 'Message' parent class allows addition of certain global features like timestamps.
+    Override = -1
     Broadcast = 0
     LogRequest = 1
     LogResponse = 2
     VoteRequest = 3
     VoteResponse = 4
+
+class Override(Message):
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
 
 class Broadcast(Message):
     def __init__(self, record):
