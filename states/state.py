@@ -19,6 +19,7 @@ class State():
     # 'log' is a list of tuples. tuple pos0 is entry term and tuple pos1 is the entry itself.
     def __init__(self, server, current_term = 0, voted_for = set([None]), log = [], commit_length = 0,
                  current_role = Follower, current_leader = None, votes_received = set(), sent_length = {}, acked_length = {}):
+        
         # These variables must be stored on stable storage - ie an HDD/SSD.
         self._current_term = current_term
         self._voted_for = voted_for
@@ -51,55 +52,15 @@ class State():
             case Message.VoteRequest: self.on_vote_request(message)
             case Message.VoteResponse: self.on_vote_response(message)
     
-    def set_params(self, message):
-        self.__dict__.update(message.__dict__)
-
     # TODO
     def send_message(self, recipient, message):
         pass
 
-    def commit_log_entries(self):
-        def acks(length):
-            ack_nodes = set()
-            for node in self.node_ids:
-                if self._acked_length[node] >= length:
-                    ack_nodes.add(node)
-            return len(ack_nodes)
-        min_acks = self.node_majority
-        ready = set([l for l in range(1, len(self._log)+1) if acks(l) >= min_acks])
-        highest_rdy_to_commit = max(ready)
-        if len(ready) != 0 and highest_rdy_to_commit > self._commit_length and self._log[highest_rdy_to_commit - 1][0] == self._current_term:
-            for i in range(self._commit_length, highest_rdy_to_commit):
-                self.deliver_to_server(self._log[i][1])
-            self._commit_length = highest_rdy_to_commit
-
     def deliver_to_server(self, instruction):
         self.server._instructions.append(instruction)
 
-    def append_entries(self, prefix_len, leader_commit, suffix):
-        suffix_len = len(suffix)
-        if suffix_len > 0 and len(self._log) > prefix_len:
-            index = min(len(self._log), prefix_len + suffix_len) - 1
-            if self._log[index][0] != suffix[index-prefix_len][0]:
-                self._log = self._log[:prefix_len]
-        
-        if prefix_len + suffix_len > len(self._log):
-            for i in range(len(self._log) - prefix_len, suffix_len):
-                self._log.append(suffix[i])
-        
-        if leader_commit > self._commit_length:
-            for i in range(self._commit_length, leader_commit):
-                self.deliver_to_server(self._log[i][1])
-            self._commit_length = leader_commit
-    
-    def replicate_log(self, follower_id):
-        prefix_len = self._sent_length[follower_id]
-        suffix = self._log[prefix_len:-1]
-        prefix_term = 0
-        if prefix_len > 0: prefix_term = self._log[prefix_len - 1][0]
-
-        msg_to_send = LogRequest(self.id, self._current_term, prefix_len, prefix_term, self._commit_length, suffix)
-        self.send_message(follower_id, msg_to_send)
+    def set_params(self, message):
+        self.__dict__.update(message.__dict__)
 
     def on_broadcast(self, message):
         record = message._record
@@ -206,19 +167,61 @@ class State():
             self.change_role(State.Follower)
             self._voted_for = set([None])
 
-    # TODO
+    # Depends on 'deliver_to_server'
+    def append_entries(self, prefix_len, leader_commit, suffix):
+        suffix_len = len(suffix)
+        if suffix_len > 0 and len(self._log) > prefix_len:
+            index = min(len(self._log), prefix_len + suffix_len) - 1
+            if self._log[index][0] != suffix[index-prefix_len][0]:
+                self._log = self._log[:prefix_len]
+        
+        if prefix_len + suffix_len > len(self._log):
+            for i in range(len(self._log) - prefix_len, suffix_len):
+                self._log.append(suffix[i])
+        
+        if leader_commit > self._commit_length:
+            for i in range(self._commit_length, leader_commit):
+                self.deliver_to_server(self._log[i][1])
+            self._commit_length = leader_commit
+
+    # Depends on 'on_log_request' and 'send_message'
+    def replicate_log(self, follower_id):
+        prefix_len = self._sent_length[follower_id]
+        suffix = self._log[prefix_len:-1]
+        prefix_term = 0
+        if prefix_len > 0: prefix_term = self._log[prefix_len - 1][0]
+
+        msg_to_send = LogRequest(self.id, self._current_term, prefix_len, prefix_term, self._commit_length, suffix)
+        self.send_message(follower_id, msg_to_send)
+
+    # Depends on 'deliver_to_server'
+    def commit_log_entries(self):
+        def acks(length):
+            ack_nodes = set()
+            for node in self.node_ids:
+                if self._acked_length[node] >= length:
+                    ack_nodes.add(node)
+            return len(ack_nodes)
+        min_acks = self.node_majority
+        ready = set([l for l in range(1, len(self._log)+1) if acks(l) >= min_acks])
+        highest_rdy_to_commit = max(ready)
+        if len(ready) != 0 and highest_rdy_to_commit > self._commit_length and self._log[highest_rdy_to_commit - 1][0] == self._current_term:
+            for i in range(self._commit_length, highest_rdy_to_commit):
+                self.deliver_to_server(self._log[i][1])
+            self._commit_length = highest_rdy_to_commit
+    
     def change_role(self, new_role):
         self.cancel_election = False
         match new_role:
             case State.Follower:
                 self._current_role = State.Follower
-                threading.Thread(target=self.leader_check, args=self).start()
+                threading.Thread(target=self.leader_check, args=tuple()).start()
 
             case State.Candidate:
                 self._current_role = State.Candidate
                 self._voted_for = set([self.id])
                 self._votes_received = set([self.id])
-                threading.Thread(target=self.hold_election, args=self).start()
+                threading.Thread(target=self.hold_election, args=tuple()).start()
 
             case State.Leader:
                 self._current_role = State.Leader
@@ -229,10 +232,8 @@ class State():
                     self._acked_length[follower_node] = 0
                     self.replicate_log(follower_node)
 
-                threading.Thread(target=self.periodic_heartbeat, args=self).start()
+                threading.Thread(target=self.periodic_heartbeat, args=tuple()).start()
 
-
-    # TODO
     def hold_election(self):
         self.election_timeout = State.CANDIDATE_ELECTION_TIMEOUT
         self._current_term += 1
