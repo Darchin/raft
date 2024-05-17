@@ -100,7 +100,17 @@ class State():
     
     # TODO
     def send_message(self, recipient, message):
-        pass
+        """
+        Sends a message to the specified recipient.
+
+        Args:
+            recipient (int): The ID of the recipient node.
+            message: The message object to be sent.
+
+        Returns:
+            None
+        """
+        self.server.send_message_to_another_node(recipient, message)
 
     def deliver_to_server(self, instruction):
         """
