@@ -174,7 +174,7 @@ class State():
 
         # Check if the received term is equal to the current term
         if term == self._current_term:
-            self._role = State.Follower
+            self.change_role(State.Follower)
             self._current_leader = leader_id
 
         # Check if the log is consistent with the received prefix length and term
@@ -226,12 +226,12 @@ class State():
         elif term > self._current_term:
             # Update the current term and current role to Follower
             self._current_term = term
-            self._current_role = State.Follower
-            # self.change_role(State.Follower)
             # Reset the voted_for set to include None
             self._voted_for = set([None])
             # Cancel the ongoing election
-            self.cancel_election()
+            self.cancel_election = True
+            # Sleep to allow election phase change
+            self.change_role(State.Follower)
     
     def on_vote_request(self, message):
         """
@@ -455,9 +455,12 @@ class State():
         match new_role:
             case State.Follower:
                 # Set the current role to Follower
+                prev_role = self._current_role
                 self._current_role = State.Follower
                 # Start a new thread to check for leader status
-                threading.Thread(target=self.leader_check, args=tuple()).start()
+                # If node was already a follower, no need to start another thread
+                if prev_role == State.Follower:
+                    threading.Thread(target=self.leader_check, args=tuple()).start()
 
             case State.Candidate:
                 # Set the current role to Candidate
